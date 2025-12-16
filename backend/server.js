@@ -1,4 +1,3 @@
-// backend server for tubefetch
 
 const express = require('express');
 const cors = require('cors');
@@ -11,47 +10,60 @@ const helmet = require('helmet');
 
 const execAsync = promisify(exec);
 const app = express();
+
+// Use Fly.io's internal port or 3001 for local
 const PORT = process.env.PORT || 3001;
+const HOST = '0.0.0.0'; // Important for Fly.io
 
-// ==========================================
-// STEP 1: Security & Middleware Setup
-// ==========================================
-console.log('🔒 Setting up security...');
+console.log('🚀 Starting TubeFetch Backend...');
+console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+console.log(`🌍 Port: ${PORT}`);
 
-// Security headers
-app.use(helmet());
+// Security middleware
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 
-// CORS - Allow frontend to access backend
+// CORS - Allow all origins in production (or specify your frontend URL)
+const allowedOrigins = process.env.FRONTEND_URL 
+  ? process.env.FRONTEND_URL.split(',')
+  : ['http://localhost:3000', 'https://tubefetch.fly.dev'];
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.some(allowed => origin.includes(allowed)) || origin.includes('.fly.dev')) {
+      callback(null, true);
+    } else {
+      callback(null, true); // Allow all for now, restrict later
+    }
+  },
   credentials: true
 }));
 
-// Parse JSON requests
 app.use(express.json());
 
-// ==========================================
-// STEP 2: Rate Limiting (Prevent Abuse)
-// ==========================================
-console.log('⏱️  Setting up rate limiting...');
+// Trust proxy (important for Fly.io)
+app.set('trust proxy', 1);
 
-// General API rate limiter
+// Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // 10 requests per window
-  message: 'Too many requests, please try again later.'
+  windowMs: 15 * 60 * 1000,
+  max: 20, // Increased for production
+  message: 'Too many requests, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
-// Download rate limiter (stricter)
 const downloadLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 5, // 5 downloads per hour
-  message: 'Download limit exceeded. Please try again in an hour.'
+  windowMs: 60 * 60 * 1000,
+  max: 10, // Increased for production
+  message: 'Download limit exceeded. Please try again in an hour.',
+  standardHeaders: true,
+  legacyHeaders: false,
 });
-
-// ==========================================
-// STEP 3: Helper Functions
-// ==========================================
 
 // Validate YouTube URL
 function isValidYouTubeUrl(url) {
@@ -62,54 +74,53 @@ function isValidYouTubeUrl(url) {
   return patterns.some(pattern => pattern.test(url));
 }
 
-// Sanitize URL to prevent command injection
+// Sanitize URL
 function sanitizeUrl(url) {
   return url.replace(/[;&|`$(){}[\]<>]/g, '');
 }
 
-// ==========================================
-// STEP 4: API Endpoints
-// ==========================================
-
-// Health Check Endpoint
-app.get('/health', (req, res) => {
-  console.log('✅ Health check requested');
+// Health check endpoint
+app.get('/', (req, res) => {
   res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
+    status: 'healthy',
     service: 'TubeFetch API',
-    version: '1.0.0'
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
   });
 });
 
-// Get Video Information
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    service: 'TubeFetch API',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Get video information
 app.post('/api/video-info', limiter, async (req, res) => {
-  console.log('\n📹 Video info requested');
+  console.log('📹 Video info requested');
   
   try {
     const { url } = req.body;
     
-    // Validation
     if (!url || typeof url !== 'string') {
-      console.log('❌ No URL provided');
       return res.status(400).json({ error: 'URL is required' });
     }
 
     if (!isValidYouTubeUrl(url)) {
-      console.log('❌ Invalid YouTube URL:', url);
       return res.status(400).json({ error: 'Invalid YouTube URL' });
     }
 
-    console.log('✅ Valid URL:', url);
     const sanitizedUrl = sanitizeUrl(url);
+    console.log('🔍 Fetching metadata for:', sanitizedUrl);
 
-    // Use yt-dlp to get video metadata
-    console.log('🔍 Fetching video metadata...');
     const command = `yt-dlp --dump-json --no-warnings "${sanitizedUrl}"`;
     
     const { stdout, stderr } = await execAsync(command, {
-      timeout: 30000, // 30 second timeout
-      maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+      timeout: 30000,
+      maxBuffer: 1024 * 1024 * 10
     });
 
     if (stderr && !stdout) {
@@ -120,7 +131,6 @@ app.post('/api/video-info', limiter, async (req, res) => {
     const videoData = JSON.parse(stdout);
     console.log('✅ Video found:', videoData.title);
 
-    // Extract available formats
     const formats = videoData.formats
       .filter(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.ext === 'mp4')
       .map(f => ({
@@ -145,7 +155,6 @@ app.post('/api/video-info', limiter, async (req, res) => {
       ]
     };
 
-    console.log('✅ Sending video info');
     res.json(response);
 
   } catch (error) {
@@ -162,127 +171,165 @@ app.post('/api/video-info', limiter, async (req, res) => {
   }
 });
 
-// Download Video
+// Download video
 app.get('/api/download', downloadLimiter, async (req, res) => {
-  console.log('\n⬇️  Download requested');
+  console.log('⬇️  Download requested');
   
   try {
     const { url, quality } = req.query;
 
-    // Validation
     if (!url || !quality) {
-      console.log('❌ Missing parameters');
       return res.status(400).json({ error: 'URL and quality are required' });
     }
 
     if (!isValidYouTubeUrl(url)) {
-      console.log('❌ Invalid URL');
       return res.status(400).json({ error: 'Invalid YouTube URL' });
     }
 
-    console.log('✅ Download request:', quality, 'from', url);
+    console.log('✅ Downloading:', quality, 'from', url);
     const sanitizedUrl = sanitizeUrl(url);
 
-    // Quality to format mapping
-    const qualityMap = {
-      '1080p': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]',
-      '720p': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]',
-      '480p': 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]',
-      '360p': 'bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]'
+    // Use simpler format selection that's more reliable
+    const qualityHeightMap = {
+      '1080p': 1080,
+      '720p': 720,
+      '480p': 480,
+      '360p': 360
     };
 
-    const formatSelector = qualityMap[quality] || 'best[ext=mp4]';
+    const targetHeight = qualityHeightMap[quality] || 720;
+    const formatSelector = `best[height<=${targetHeight}][ext=mp4]/best[height<=${targetHeight}]/best[ext=mp4]/best`;
 
-    // Create temp directory
-    const tempDir = path.join(__dirname, 'temp');
-    await fs.mkdir(tempDir, { recursive: true });
+    console.log('⏳ Starting download with yt-dlp (streaming to client)...');
 
-    const timestamp = Date.now();
-    const outputTemplate = path.join(tempDir, `video_${timestamp}.%(ext)s`);
+    // Set headers immediately to start download
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="video_${quality}.mp4"`);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Transfer-Encoding', 'chunked');
 
-    // Download with yt-dlp
-    console.log('⏳ Downloading video...');
-    const command = `yt-dlp -f "${formatSelector}" --merge-output-format mp4 -o "${outputTemplate}" "${sanitizedUrl}"`;
+    // Stream directly from yt-dlp to client without saving to disk
+    // Use default yt-dlp settings which work better with YouTube
+    const command = `yt-dlp -f "best[ext=mp4]/best" -o - "${sanitizedUrl}"`;
 
-    await execAsync(command, {
-      timeout: 300000, // 5 minute timeout
-      maxBuffer: 1024 * 1024 * 100 // 100MB buffer
+    console.log('📡 Piping yt-dlp output directly to client...');
+
+    const childProcess = require('child_process').spawn('bash', ['-c', command], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 1024 * 1024 * 100
     });
 
-    // Find downloaded file
-    const files = await fs.readdir(tempDir);
-    const videoFile = files.find(f => f.startsWith(`video_${timestamp}`));
+    let dataReceived = false;
+    let errorMessage = '';
 
-    if (!videoFile) {
-      throw new Error('Downloaded file not found');
-    }
+    childProcess.stdout.on('data', (chunk) => {
+      dataReceived = true;
+      if (!res.headersSent) {
+        res.writeHead(200);
+      }
+      res.write(chunk);
+    });
 
-    const filePath = path.join(tempDir, videoFile);
-    const stat = await fs.stat(filePath);
-
-    console.log('✅ Video ready, streaming to client...');
-
-    // Set headers
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Length', stat.size);
-    res.setHeader('Content-Disposition', `attachment; filename="video_${quality}.mp4"`);
-
-    // Stream file
-    const fileStream = require('fs').createReadStream(filePath);
-    fileStream.pipe(res);
-
-    // Cleanup after streaming
-    fileStream.on('end', async () => {
-      try {
-        await fs.unlink(filePath);
-        console.log('🗑️  Cleaned up:', videoFile);
-      } catch (err) {
-        console.error('Cleanup error:', err);
+    childProcess.stderr.on('data', (chunk) => {
+      errorMessage += chunk.toString();
+      const msg = chunk.toString();
+      // Log progress messages but don't print full details
+      if (msg.includes('ERROR') || msg.includes('error')) {
+        console.error('❌ yt-dlp error:', msg.substring(0, 300));
+      } else {
+        console.log('ℹ️  yt-dlp:', msg.substring(0, 200));
       }
     });
 
-    fileStream.on('error', (err) => {
-      console.error('Stream error:', err);
-      res.status(500).end();
+    childProcess.on('close', (code) => {
+      if (code === 0) {
+        console.log('✅ Download complete');
+        res.end();
+      } else {
+        if (!dataReceived) {
+          // Haven't sent headers yet, send error response
+          if (!res.headersSent) {
+            const cleanError = errorMessage
+              .split('\n')
+              .filter(line => line.includes('ERROR') || line.includes('error') || line.includes('Failed'))
+              .join(' ')
+              .substring(0, 500) || 'Unknown error from yt-dlp';
+            
+            console.error('❌ yt-dlp failed with code', code);
+            res.status(500).json({
+              error: 'Failed to download video',
+              details: cleanError
+            });
+          } else {
+            // Already streaming, just end the response
+            res.end();
+          }
+        } else {
+          // Already streaming data, just end
+          res.end();
+        }
+        console.error('❌ Download process exit code:', code);
+      }
+    });
+
+    childProcess.on('error', (err) => {
+      console.error('❌ Process error:', err.message);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Failed to start download',
+          details: err.message
+        });
+      }
+    });
+
+    // Handle client disconnect
+    res.on('close', () => {
+      if (!childProcess.killed) {
+        childProcess.kill();
+        console.log('⚠️  Client disconnected, killing download process');
+      }
     });
 
   } catch (error) {
     console.error('❌ Download error:', error.message);
     
-    if (error.killed) {
-      return res.status(504).json({ error: 'Download timeout' });
+    if (!res.headersSent) {
+      const errorMessage = error.message.substring(0, 300);
+      res.status(500).json({ 
+        error: `Download failed: ${errorMessage}`,
+        details: process.env.NODE_ENV === 'development' ? errorMessage : undefined
+      });
     }
-    
-    res.status(500).json({ 
-      error: 'Download failed',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
   }
 });
 
-// ==========================================
-// STEP 5: Start Server
-// ==========================================
+// Error handling
+app.use((err, req, res, next) => {
+  console.error('❌ Unhandled error:', err);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
+});
 
-app.listen(PORT, () => {
-  console.log('\n' + '='.repeat(50));
-  console.log('🚀 TubeFetch Backend Server Started!');
-  console.log('='.repeat(50));
+// Start server
+app.listen(PORT, HOST, () => {
+  console.log('\n' + '='.repeat(60));
+  console.log('🚀 TubeFetch Backend Running on Fly.io');
+  console.log('='.repeat(60));
+  console.log(`📍 Host: ${HOST}`);
   console.log(`📍 Port: ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`📝 API base: http://localhost:${PORT}/api`);
-  console.log('='.repeat(50) + '\n');
-  console.log('✅ Server is ready to accept requests!\n');
+  console.log('='.repeat(60) + '\n');
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('\n⚠️  SIGTERM received, shutting down gracefully...');
+  console.log('⚠️  SIGTERM received, shutting down...');
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
-  console.log('\n⚠️  SIGINT received, shutting down gracefully...');
+  console.log('⚠️  SIGINT received, shutting down...');
   process.exit(0);
 });

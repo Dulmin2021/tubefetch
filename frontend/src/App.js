@@ -70,33 +70,88 @@ function App() {
   };
 
   // Download video
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (!videoInfo || !selectedQuality) return;
 
     setLoading(true);
+    setError('');
 
     try {
-      // Create download URL
+      // Create download URL with query parameters
       const downloadUrl = `${API_URL}/api/download?url=${encodeURIComponent(url)}&quality=${selectedQuality}`;
       
       console.log('Starting download from:', downloadUrl);
       
-      // Create hidden iframe to trigger download
-      const iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.src = downloadUrl;
-      document.body.appendChild(iframe);
+      // Fetch the video file with a longer timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3600000); // 60 minutes timeout for streaming
       
-      // Show success message and cleanup
+      const response = await fetch(downloadUrl, {
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        let errorMessage = `Download failed with status ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+          if (errorData.details) {
+            errorMessage += `: ${errorData.details}`;
+          }
+        } catch (e) {
+          // Response wasn't JSON
+        }
+        throw new Error(errorMessage);
+      }
+
+      // Get the filename from Content-Disposition header
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let filename = 'video.mp4';
+      
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?(.+?)"?$/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+
+      // Convert response to blob with progress
+      const blob = await response.blob();
+      
+      if (blob.size === 0) {
+        throw new Error('Download returned empty file. The video may not be available.');
+      }
+
+      // Create blob URL and download
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      
+      // Append to body, click, and cleanup
+      document.body.appendChild(link);
+      link.click();
+      
+      // Cleanup
       setTimeout(() => {
-        document.body.removeChild(iframe);
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(blobUrl);
         setLoading(false);
-        alert(`✅ Download started!\n\nVideo: ${videoInfo.title}\nQuality: ${selectedQuality}\n\nCheck your downloads folder.`);
-      }, 2000);
+        const sizeInMB = (blob.size / 1024 / 1024).toFixed(2);
+        alert(`✅ Download completed!\n\nVideo: ${videoInfo.title}\nQuality: ${selectedQuality}\nFile: ${filename}\nSize: ${sizeInMB}MB`);
+      }, 500);
       
     } catch (err) {
       console.error('Download error:', err);
-      setError('Download failed. Please try again.');
+      
+      let errorMessage = err.message;
+      if (err.name === 'AbortError') {
+        errorMessage = 'Download timeout. The video took too long to process.';
+      }
+      
+      setError(`❌ ${errorMessage}`);
       setLoading(false);
     }
   };
@@ -116,19 +171,6 @@ function App() {
             </div>
           </div>
         </header>
-
-        {/* Legal Warning Banner */}
-        <div className="warning-banner">
-          <div className="container">
-            <div className="warning-content">
-              <AlertCircle className="warning-icon" />
-              <div className="warning-text">
-                <strong>Legal Notice:</strong> This tool is for personal use only. Downloading videos may violate YouTube's Terms of Service. 
-                Only download content you own or have permission to download. You are responsible for respecting copyright laws.
-              </div>
-            </div>
-          </div>
-        </div>
 
         {/* Main Content */}
         <main className="main-content">

@@ -1,30 +1,43 @@
 FROM node:18-bookworm-slim
 
-# Install yt-dlp and ffmpeg (Debian-based)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    ffmpeg \
-    ca-certificates && \
-    rm -rf /var/lib/apt/lists/* && \
-    pip3 install --no-cache-dir yt-dlp
+ENV DEBIAN_FRONTEND=noninteractive
 
+# Install minimal runtime deps and fetch yt-dlp static binary
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ffmpeg \
+      curl \
+      ca-certificates; \
+    curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp; \
+    chmod a+rx /usr/local/bin/yt-dlp; \
+    yt-dlp --version; \
+    rm -rf /var/lib/apt/lists/*
+
+# Set working directory
 WORKDIR /app
 
-# Copy backend files
+# Copy package files
 COPY backend/package*.json ./
-RUN npm ci --only=production
 
+# Install Node.js dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy application code
 COPY backend/ ./
 
-# Create temp directory
-RUN mkdir -p /app/temp && chown -R node:node /app
+# Create temp directory for downloads
+RUN mkdir -p /tmp && chmod 777 /tmp
 
-# Switch to non-root user
-USER node
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
-EXPOSE 3001
+# Expose port (Fly.io uses PORT env variable)
+EXPOSE 8080
 
-HEALTHCHECK CMD node -e "require('http').get('http://localhost:3001/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+# Set environment
+ENV NODE_ENV=production
 
+# Start application
 CMD ["node", "server.js"]
